@@ -62,23 +62,28 @@ class TextProcessor(object):
     If ground truth labels are also provided, returns the corresponding tensor as well.
     Otherwise, returns a tensor fo 0s."""
 
-    _unknown_word = '_UNK'
+    unknown_word = '_UNK'
 
     def __init__(self, wd_emb: WordEmbeddings, seq_len: int) -> None:
         self._wordembeddings = wd_emb
         self._sequencelen = seq_len
+
+    def get_sequence_length(self) -> int:
+        """Returns the configured sequence length of this object."""
+        return self._sequencelen
 
     def process_text(self, text: str) -> tuple:
         """Takes a simple `text` and returns a tuple of PyTorch tensors."""
 
         tokens = word_tokenize(text)
         labels = [0] * len(tokens)
+        text_inputs, _ = self.process_training_tokens(tokens, labels)
 
-        return self.process_training_tokens(tokens, labels)
+        return (tokens, text_inputs)
 
     def process_training_tokens(self, tokens: list, labels: list) -> tuple:
         while len(tokens) < self._sequencelen:
-            tokens.append(TextProcessor._unknown_word)
+            tokens.append(TextProcessor.unknown_word)
             labels.append(0)
         # end if
 
@@ -90,9 +95,6 @@ class TextProcessor(object):
             seq_embeddings = list(
                 map(self._wordembeddings.get_word_embedding_vector, sequence))
             seq_labels = labels[i:i + self._sequencelen]
-            # Get a vector of 2 classes with 1 on the first position if label == 0
-            # and 1 on the second position if label == 1
-            seq_labels = [[1, 0] if x == 0 else [0, 1] for x in seq_labels]
             text_embeddings.append(seq_embeddings)
             label_embeddings.append(seq_labels)
         # end for
@@ -103,7 +105,7 @@ class TextProcessor(object):
             torch.tensor(text_embeddings, dtype=torch.float32),
             # Shape of this is (batch_size, seq_len, 2)
             # We only have 2 classes
-            torch.tensor(label_embeddings, dtype=torch.float32)
+            torch.tensor(label_embeddings, dtype=torch.long)
         )
 
 

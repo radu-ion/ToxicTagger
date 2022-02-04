@@ -38,8 +38,8 @@ class ToxicDetectorModule(nn.Module):
         # This is the final classification layer
         # We only have 2 classes, 'offensive' and 'not offensive' => output vector of 2 elements
         self.dense_2 = nn.Linear(ToxicDetectorModule._conf_dense_size, 2)
-        self.softmax = nn.Softmax(dim=1)
-        self.relu = nn.ReLU()
+        self.logsoftmax = nn.LogSoftmax(dim=2)
+        self.tanh = nn.Tanh()
 
     def forward(self, x):
         # Hidden state initialization
@@ -50,16 +50,13 @@ class ToxicDetectorModule(nn.Module):
 
         # Propagate input through LSTM, get output and state information
         out, (h_n, c_n) = self.lstm(x, (h_0, c_0))
-        # Reshaping the data for dense layer next
-        # Hout (== self.hidden_size) is the last dimension
-        h_n = h_n.view(-1, self.hidden_size)
-        out = self.relu(h_n)
+        out = self.tanh(out)
         out = self.dense_1(out)
-        out = self.relu(out)
+        out = self.tanh(out)
         out = self.dense_2(out)
-        toxic_probs = self.softmax(out)
+        out = self.logsoftmax(out)
 
-        return toxic_probs
+        return out
 
 
 class ToxicTagger(object):
@@ -70,7 +67,7 @@ class ToxicTagger(object):
         self._model = td_mod
         self._processor = tx_proc
         self._optimizer = Adam(params=self._model.parameters(), lr=0.003)
-        self._loss_fn = nn.CrossEntropyLoss()
+        self._loss_fn = nn.NLLLoss()
         self._training_loader = None
         self._test_loader = None
 
@@ -81,11 +78,15 @@ class ToxicTagger(object):
             self._test_loader = DataLoader(data, batch_size=8, shuffle=True)
         # end if
 
+    def load_model(self, model_file: str):
+        print(f'Loading pre-trained model {model_file}', file=sys.stderr, flush=True)
+        self._model.load_state_dict(torch.load(model_file))
+
     def train(self, epochs: int = 5):
         """Main training method. Trains for a number of epochs equal to `epochs`."""
 
         now = datetime.now()
-        timestamp = f'{now.year}-{now.month}-{now.day}_{now.hour}-{now.min}'
+        timestamp = f'{now.year}-{now.month}-{now.day}_{now.hour}-{now.minute}'
         tensorboard_writer = SummaryWriter(os.path.join('runs', 'toxictagger-' + timestamp))
         best_tloss = 1_000_000.
 
@@ -102,21 +103,36 @@ class ToxicTagger(object):
 
             # Compute test loss
             running_tloss = 0.0
+            running_correct = 0
+            running_total = 0
 
-            for i, tdata in enumerate(self._test_loader):
-                tinputs, tlabels = tdata
+            for i, (tinputs, tlabels) in enumerate(self._test_loader):
+                # Run model on the test inputs
                 toutputs = self._model(tinputs)
+                
+                # Compute test loss
+                toutputs = torch.swapaxes(toutputs, 1, 2)
                 tloss = self._loss_fn(toutputs, tlabels)
                 running_tloss += tloss
+
+                # Compute test accuracy
+                _, tpredictions = torch.max(toutputs, dim=1)
+                running_correct += (tpredictions == tlabels).sum().item()
+                running_total += tlabels.shape[0] * tlabels.shape[1]
             # end for
 
             avg_tloss = running_tloss / (i + 1)
-            print(f'Train loss = {avg_loss}, Test loss = {avg_tloss}', file=sys.stderr, flush=True)
+            print(
+                f'Train loss = {avg_loss:.5f}, Test loss = {avg_tloss:.5f}', file=sys.stderr, flush=True)
+            test_acc = running_correct / running_total
+            print(f'Test accuracy = {test_acc:.5f}',
+                  file=sys.stderr, flush=True)
 
             # Log the running loss averaged per batch
             # for both training and test
             tensorboard_writer.add_scalars('Training vs. Test loss', {
                                            'Training': avg_loss, 'Test': avg_tloss}, epoch_number)
+            tensorboard_writer.add_scalar('Test accuracy', test_acc, epoch_number)
             tensorboard_writer.flush()
 
             # Track best performance and save the model's state
@@ -143,6 +159,10 @@ class ToxicTagger(object):
             # Make predictions for this batch
             outputs = self._model(inputs)
 
+            # Have to swap axes for NLLLoss function
+            # Classes are on the second dimension, dim=1
+            outputs = torch.swapaxes(outputs, 1, 2)
+
             # Compute the loss and its gradients
             loss = self._loss_fn(outputs, labels)
             loss.backward()
@@ -156,14 +176,63 @@ class ToxicTagger(object):
             if (i + 1) % 1000 == 0:
                 # loss per batch
                 last_loss = running_loss / 1000  
-                print(f'  batch {i + 1} loss: {last_loss}', file=sys.stderr, flush=True)
+                print(f'  batch {i + 1} loss: {last_loss:.5f}',
+                      file=sys.stderr, flush=True)
                 tb_x = epoch * len(self._training_loader) + i + 1
-                tb_writer.add_scalar('Loss/train', last_loss, tb_x)
+                tb_writer.add_scalar('Train loss', last_loss, tb_x)
                 tb_writer.flush()
                 running_loss = 0.
             # end of
 
         return last_loss
+
+    def run_toxic_tagger(self, text: str) -> tuple:
+        """This is the main method of the tagger.
+        Takes the text, processes it and returns a list of tokens
+        with their labels."""
+
+        text_toks, text_inputs = self._processor.process_text(text)
+        text_predictions = self._model(text_inputs)
+        pred_dicts = []
+
+        for _ in range(len(text_toks)):
+            pred_dicts.append({'0': 0., '1': 0.})
+        # end for
+
+        # There are text_predictions.shape[0] sequences
+        # of the given length (e.g. 10) in text
+        # Loop over each one and accumulate probabilities for
+        # classes 0 and 1
+        for i in range(text_predictions.shape[0]):
+            for j in range(self._processor.get_sequence_length()):
+                # Network outputs LogSoftmax, so exp that back to get probabilities
+                pred_ij = torch.exp(text_predictions[i, j, :])
+                zero_class_prob = pred_ij[0].item()
+                one_class_prob = pred_ij[1].item()
+                dict_ij = pred_dicts[i + j]
+                dict_ij['0'] += zero_class_prob
+                dict_ij['1'] += one_class_prob
+            # end for j
+        # end for i
+
+        text_labels = ['0'] * len(text_toks)
+
+        for i in range(len(pred_dicts)):
+            pd = pred_dicts[i]
+
+            # Strategy 1: if accumulated prob for 1 is bigger, it's toxic
+            #if pd['1'] > pd['0']:
+            #    text_labels[i] = '1'
+            # end if
+
+            # Strategy 2: if label 1 (toxic) has been assigned in at least
+            # two frames, it's toxic.
+            if pd['1'] >= 1.:
+                text_labels[i] = '1'
+            # end if
+        # end for
+
+        return (text_toks, text_labels)
 
 
 if __name__ == '__main__':
@@ -178,20 +247,48 @@ if __name__ == '__main__':
     
     # This is the text processor, processing 10 words sequences
     txt_proc = dataset.TextProcessor(we, conf_seqence_length)
-    # Train and test sets
-    td_train = dataset.ToxicData(
-        os.path.join('data', 'tsd_train.csv'), txt_proc)
-    td_test = dataset.ToxicData(os.path.join('data', 'tsd_test.csv'), txt_proc)
-    # Train and test TensorDataset(s)
-    train_tds = td_train.get_tensor_dataset()
-    test_tds = td_test.get_tensor_dataset()
 
     # The toxic detector NN PyTorch module
-    toxic_detector_module = ToxicDetectorModule(conf_input_size, 64, conf_seqence_length)
+    toxic_detector_module = ToxicDetectorModule(
+        conf_input_size, 64, conf_seqence_length)
     toxic_tagger = ToxicTagger(toxic_detector_module, txt_proc)
-    # Load train/test datasets to train/test on
-    toxic_tagger.load_dataset(train_tds, ml_type='train')
-    toxic_tagger.load_dataset(test_tds, ml_type='test')
 
-    # Do the training
-    toxic_tagger.train()
+    if len(sys.argv) == 2 and sys.argv[1] == '-t':
+        # Training model
+        # Train and test sets
+        td_train = dataset.ToxicData(
+            os.path.join('data', 'tsd_train.csv'), txt_proc)
+        td_test = dataset.ToxicData(
+            os.path.join('data', 'tsd_test.csv'), txt_proc)
+        # Train and test TensorDataset(s)
+        train_tds = td_train.get_tensor_dataset()
+        test_tds = td_test.get_tensor_dataset()
+
+        # Load train/test datasets to train/test on
+        toxic_tagger.load_dataset(train_tds, ml_type='train')
+        toxic_tagger.load_dataset(test_tds, ml_type='test')
+
+        # Do the training. Saving is done here
+        toxic_tagger.train()
+    elif len(sys.argv) == 3 and sys.argv[1] == '-e' and \
+        os.path.isfile(sys.argv[2]):
+        # Eval mode, on the test data
+        td_test = dataset.ToxicData(
+            os.path.join('data', 'tsd_test.csv'), txt_proc)
+        toxic_tagger.load_model(sys.argv[2])
+    elif len(sys.argv) == 4 and sys.argv[1] == '-r' and \
+        os.path.isfile(sys.argv[2]) and os.path.isfile(sys.argv[3]):
+        # Run mode, load model from the -r argument
+        # and run on last file argument
+        toxic_tagger.load_model(sys.argv[2])
+
+        with open(sys.argv[3], mode='r', encoding='utf-8') as f:
+            all_lines = ''.join(f.readlines())
+        # end with
+
+        tokens, labels = toxic_tagger.run_toxic_tagger(text=all_lines)
+
+        # Print output
+        for tok, lbl in zip(tokens, labels):
+            print(f'{tok}\t{lbl}', flush=True)
+        # end for
