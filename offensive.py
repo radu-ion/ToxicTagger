@@ -240,9 +240,7 @@ if __name__ == '__main__':
     conf_seqence_length = 10
     
     # Load word embeddings to use as inputs
-    # Change the path here to point to your cc.en.300.vec file!
-    # TODO: automatically download the file from https://fasttext.cc/docs/en/crawl-vectors.html
-    we = dataset.WordEmbeddings(we_file='D:\\Temp\\cc.en.300.vec')
+    we = dataset.WordEmbeddings()
     conf_input_size = we.get_vector_size()
     
     # This is the text processor, processing 10 words sequences
@@ -292,3 +290,6 @@ if __name__ == '__main__':
         for tok, lbl in zip(tokens, labels):
             print(f'{tok}\t{lbl}', flush=True)
         # end for
+    else:
+        print('Usage:\n  python|python3 offensive.py -t\n  python|python3 offensive.py -r <models/saved_model_file> <test_file.txt>')
+    # end if

@@ -1,5 +1,7 @@
+import os
 import sys
 import re
+import gzip
 import pandas as pd
 from nltk.tokenize import word_tokenize
 import torch
@@ -15,13 +17,14 @@ class WordEmbeddings(object):
     Get the English file from https://fasttext.cc/docs/en/crawl-vectors.html.
     """
 
-    def __init__(self, we_file: str) -> None:
-        self._load_word_embeddings(we_file)
+    def __init__(self) -> None:
+        self._load_word_embeddings()
 
-    def _load_word_embeddings(self, file: str) -> dict:
+    def _load_word_embeddings(self) -> dict:
         self._embeddings = {}
+        we_file = os.path.join('data', 'cc.en.300.vec.gz')
 
-        with open(file, mode='r', encoding='utf-8') as f:
+        with gzip.open(we_file, mode='rt', encoding='utf-8') as f:
             line = f.readline()
             line = line.strip()
             word_count, vec_dim = [int(x) for x in line.split()]
@@ -37,7 +40,7 @@ class WordEmbeddings(object):
 
                 if counter % 100000 == 0:
                     print(
-                        f'Read {counter}/{word_count} words from file {file}')
+                        f'Read {counter}/{word_count} words from file {we_file}')
                 # end if
 
                 counter += 1
