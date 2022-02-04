@@ -20,7 +20,7 @@ All output is printed to the `sys.stdout` file.
 
 ## About
 
-A simple LSTM-based neural network, written in PyTorch 1.10, that detects contiguous spans of ``toxic text''.
-By ``toxic text'' we understand insulting/threating/identity-based attacking/obscene phrases.
+A simple LSTM-based neural network, written in PyTorch 1.10, that detects contiguous spans of "toxic text".
+By "toxic text" we understand insulting/threating/identity-based attacking/obscene phrases.
 Training data comes from the ``Semeval-2021 Task 5: Toxic Spans Detection'' competition.
 The link to the relevant paper is here: https://aclanthology.org/2021.semeval-1.6.pdf.
