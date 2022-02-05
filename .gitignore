@@ -1,3 +1,5 @@
 .vscode/launch.json
 __pycache__/
 data/cc.en.300.vec.gz
+runs/*
+!runs/README.txt

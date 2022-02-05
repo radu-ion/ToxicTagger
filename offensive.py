@@ -1,6 +1,7 @@
 import os
 import sys
 from datetime import datetime
+from unicodedata import bidirectional
 import torch
 import torch.nn as nn
 from torch.optim import Adam
@@ -8,17 +9,21 @@ from torch.autograd import Variable
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import TensorDataset
 from torch.utils.data import DataLoader
-
 import dataset
+
+
+_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# The size of the dense layer between LSTM output and classification layer
+_conf_dense_size = 128
+# How many words in a sequence for training/detection toxicity
+_conf_seqence_length = 20
+# Size of the hidden layer
+_conf_hidden_size = 32
 
 class ToxicDetectorModule(nn.Module):
     """Implements a LSTM recurrent NN to mark contiguous spans of toxic text.
     We will not distinguish among obscene/racist/insult, we will just mark the spans
     as we see them in the sentence."""
-
-    # The size of the dense layer between LSTM output and classification layer
-    # It is configurable
-    _conf_dense_size = 128
 
     def __init__(self, in_size: int, hid_size: int, seq_length: int):
         super().__init__()
@@ -31,26 +36,31 @@ class ToxicDetectorModule(nn.Module):
         self.seq_length = seq_length
 
         # One layer of LSTM cells
-        self.lstm = nn.LSTM(input_size=self.input_size, hidden_size=self.hidden_size, batch_first=True)
+        self.lstm = nn.LSTM(input_size=self.input_size, hidden_size=self.hidden_size, batch_first=True, bidirectional=True)
         # Insert a fully connected layer between LSTM output and the classification layer
-        self.dense_1 = nn.Linear(
-            self.hidden_size, ToxicDetectorModule._conf_dense_size)
+        self.dense_1 = nn.Linear(2 * self.hidden_size, _conf_dense_size)
         # This is the final classification layer
         # We only have 2 classes, 'offensive' and 'not offensive' => output vector of 2 elements
-        self.dense_2 = nn.Linear(ToxicDetectorModule._conf_dense_size, 2)
+        self.dense_2 = nn.Linear(_conf_dense_size, 2)
         self.logsoftmax = nn.LogSoftmax(dim=2)
         self.tanh = nn.Tanh()
+        self.drop = nn.Dropout(p=0.33)
+        # Place module on CUDA, if available
+        self.to(device=_device)
 
     def forward(self, x):
         # Hidden state initialization
-        h_0 = Variable(torch.zeros(
-            1, x.size(0), self.hidden_size))
+        h_0 = torch.zeros(
+            2, x.size(0), self.hidden_size)
+        h_0 = h_0.to(device=_device)
         # Internal state initialization
-        c_0 = Variable(torch.zeros(1, x.size(0), self.hidden_size))
-
+        c_0 = torch.zeros(2, x.size(0), self.hidden_size)
+        c_0 = c_0.to(device=_device)
+        
         # Propagate input through LSTM, get output and state information
         out, (h_n, c_n) = self.lstm(x, (h_0, c_0))
         out = self.tanh(out)
+        out = self.drop(out)
         out = self.dense_1(out)
         out = self.tanh(out)
         out = self.dense_2(out)
@@ -66,21 +76,22 @@ class ToxicTagger(object):
     def __init__(self, td_mod: ToxicDetectorModule, tx_proc: dataset.TextProcessor) -> None:
         self._model = td_mod
         self._processor = tx_proc
-        self._optimizer = Adam(params=self._model.parameters(), lr=0.003)
+        self._optimizer = Adam(params=self._model.parameters(), lr=0.001)
         self._loss_fn = nn.NLLLoss()
         self._training_loader = None
         self._test_loader = None
 
     def load_dataset(self, data: TensorDataset, ml_type: str):
         if ml_type == 'train' or ml_type == 'training':
-            self._training_loader = DataLoader(data, batch_size=8, shuffle=True)
+            self._training_loader = DataLoader(data, batch_size=4, shuffle=True)
         elif ml_type == 'test':
-            self._test_loader = DataLoader(data, batch_size=8, shuffle=True)
+            self._test_loader = DataLoader(data, batch_size=4, shuffle=True)
         # end if
 
     def load_model(self, model_file: str):
         print(f'Loading pre-trained model {model_file}', file=sys.stderr, flush=True)
         self._model.load_state_dict(torch.load(model_file))
+        self._model.train(False)
 
     def train(self, epochs: int = 5):
         """Main training method. Trains for a number of epochs equal to `epochs`."""
@@ -108,12 +119,14 @@ class ToxicTagger(object):
 
             for i, (tinputs, tlabels) in enumerate(self._test_loader):
                 # Run model on the test inputs
+                tinputs = tinputs.to(device=_device)
+                tlabels = tlabels.to(device=_device)
                 toutputs = self._model(tinputs)
                 
                 # Compute test loss
                 toutputs = torch.swapaxes(toutputs, 1, 2)
                 tloss = self._loss_fn(toutputs, tlabels)
-                running_tloss += tloss
+                running_tloss += tloss.item()
 
                 # Compute test accuracy
                 _, tpredictions = torch.max(toutputs, dim=1)
@@ -138,7 +151,7 @@ class ToxicTagger(object):
             # Track best performance and save the model's state
             if avg_tloss < best_tloss:
                 best_tloss = avg_tloss
-                model_path = 'model_{}_{}'.format(timestamp, epoch_number)
+                model_path = os.path.join('models', 'model_{}_{}'.format(timestamp, epoch_number))
                 torch.save(self._model.state_dict(), model_path)
             # end if
         # end for epochs
@@ -149,10 +162,11 @@ class ToxicTagger(object):
 
         # Here, we use enumerate(training_loader) so that we can track the batch
         # index and do some intra-epoch reporting
-        for i, data in enumerate(self._training_loader):
+        for i, (inputs, labels) in enumerate(self._training_loader):
             # Every data instance is an input + label pair
-            inputs, labels = data
-
+            # If CUDA is available, use it.
+            inputs, labels = inputs.to(device=_device), labels.to(device=_device)
+            
             # Zero your gradients for every batch!
             self._optimizer.zero_grad()
 
@@ -176,7 +190,7 @@ class ToxicTagger(object):
             if (i + 1) % 1000 == 0:
                 # loss per batch
                 last_loss = running_loss / 1000  
-                print(f'  batch {i + 1} loss: {last_loss:.5f}',
+                print(f'  batch {i + 1}/{len(self._training_loader)} loss: {last_loss:.5f}',
                       file=sys.stderr, flush=True)
                 tb_x = epoch * len(self._training_loader) + i + 1
                 tb_writer.add_scalar('Train loss', last_loss, tb_x)
@@ -192,6 +206,7 @@ class ToxicTagger(object):
         with their labels."""
 
         text_toks, text_inputs = self._processor.process_text(text)
+        text_inputs = text_inputs.to(device=_device)
         text_predictions = self._model(text_inputs)
         pred_dicts = []
 
@@ -236,19 +251,17 @@ class ToxicTagger(object):
 
 
 if __name__ == '__main__':
-    # 10 words in a sequence for training/detection toxicity
-    conf_seqence_length = 10
     
     # Load word embeddings to use as inputs
     we = dataset.WordEmbeddings()
     conf_input_size = we.get_vector_size()
     
     # This is the text processor, processing 10 words sequences
-    txt_proc = dataset.TextProcessor(we, conf_seqence_length)
+    txt_proc = dataset.TextProcessor(we, _conf_seqence_length)
 
     # The toxic detector NN PyTorch module
     toxic_detector_module = ToxicDetectorModule(
-        conf_input_size, 64, conf_seqence_length)
+        conf_input_size, _conf_hidden_size, _conf_seqence_length)
     toxic_tagger = ToxicTagger(toxic_detector_module, txt_proc)
 
     if len(sys.argv) == 2 and sys.argv[1] == '-t':
@@ -267,7 +280,7 @@ if __name__ == '__main__':
         toxic_tagger.load_dataset(test_tds, ml_type='test')
 
         # Do the training. Saving is done here
-        toxic_tagger.train()
+        toxic_tagger.train(epochs=3)
     elif len(sys.argv) == 3 and sys.argv[1] == '-e' and \
         os.path.isfile(sys.argv[2]):
         # Eval mode, on the test data

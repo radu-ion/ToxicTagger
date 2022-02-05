@@ -14,7 +14,7 @@ save the file under folder `data/` of this repository. I will automate this, eve
 
 Execute a test run as follows:
 
-`python3 offensive.py -r models/model_2022-2-4_17-14_2 test_file.txt`
+`python3 offensive.py -r models/model_2022-2-5_13-12_1 test_file.txt`
 
 All output is printed to the `sys.stdout` file.
 

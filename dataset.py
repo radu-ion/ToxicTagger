@@ -91,7 +91,7 @@ class TextProcessor(object):
         # end if
 
         text_embeddings = []
-        label_embeddings = []
+        ground_truth_labels = []
 
         for i in range(0, len(tokens) - self._sequencelen + 1):
             sequence = tokens[i:i + self._sequencelen]
@@ -99,16 +99,20 @@ class TextProcessor(object):
                 map(self._wordembeddings.get_word_embedding_vector, sequence))
             seq_labels = labels[i:i + self._sequencelen]
             text_embeddings.append(seq_embeddings)
-            label_embeddings.append(seq_labels)
+            ground_truth_labels.append(seq_labels)
         # end for
+
+        text_embeddings_tensor = torch.tensor(
+            text_embeddings, dtype=torch.float32)
+        labels_tensor = torch.tensor(ground_truth_labels, dtype=torch.long)
 
         return (
             # Shape of this is (batch_size, seq_len, 300)
             # 300 is the size of the embedding vector
-            torch.tensor(text_embeddings, dtype=torch.float32),
+            text_embeddings_tensor,
             # Shape of this is (batch_size, seq_len, 2)
             # We only have 2 classes
-            torch.tensor(label_embeddings, dtype=torch.long)
+            labels_tensor
         )
 
 
