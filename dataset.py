@@ -187,7 +187,7 @@ class ToxicData(object):
                     current_offset += 1
                 # end for
 
-                # And skip whitespace, and drop whitespace annotations
+                # Skip whitespace, and drop whitespace annotations
                 while current_offset < len(text) and \
                         _whitespace_rx.fullmatch(text[current_offset]):
                     current_offset += 1
@@ -211,6 +211,9 @@ class ToxicData(object):
 
         return toxic_data
 
+    def get_parsed_data(self) -> list:
+        return self._data
+
     def get_tensor_dataset(self) -> TensorDataset:
         """Builds a TensorDataset object out of the annotations in this file."""
 
@@ -229,6 +232,7 @@ class ToxicData(object):
 
             if counter >= 1 and counter % 100 == 0:
                 print(f'Built {counter}/{len(self._data)} tensors')
+            # end if
         # end all dataset
 
         all_inputs_tensor = torch.cat(inputs)

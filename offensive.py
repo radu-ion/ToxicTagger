@@ -16,9 +16,10 @@ _device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # The size of the dense layer between LSTM output and classification layer
 _conf_dense_size = 128
 # How many words in a sequence for training/detection toxicity
-_conf_seqence_length = 20
+_conf_seqence_length = 10
 # Size of the hidden layer
-_conf_hidden_size = 32
+_conf_hidden_size = 64
+
 
 class ToxicDetectorModule(nn.Module):
     """Implements a LSTM recurrent NN to mark contiguous spans of toxic text.
@@ -201,16 +202,19 @@ class ToxicTagger(object):
         return last_loss
 
     def run_toxic_tagger(self, text: str) -> tuple:
-        """This is the main method of the tagger.
-        Takes the text, processes it and returns a list of tokens
-        with their labels."""
+        tokens, inputs = self._processor.process_text(text=text)
+        return (tokens, self.run_toxic_module(text_inputs=inputs, text_len=len(tokens)))
 
-        text_toks, text_inputs = self._processor.process_text(text)
+    def run_toxic_module(self, text_inputs: torch.tensor, text_len: int) -> list:
+        """This is the main method of the tagger.
+        Takes the processed text and returns a list of labels with 
+        the same size as the list of tokens."""
+        
         text_inputs = text_inputs.to(device=_device)
         text_predictions = self._model(text_inputs)
         pred_dicts = []
 
-        for _ in range(len(text_toks)):
+        for _ in range(text_len):
             pred_dicts.append({'0': 0., '1': 0.})
         # end for
 
@@ -230,28 +234,27 @@ class ToxicTagger(object):
             # end for j
         # end for i
 
-        text_labels = ['0'] * len(text_toks)
+        text_labels = ['0'] * text_len
 
         for i in range(len(pred_dicts)):
             pd = pred_dicts[i]
 
             # Strategy 1: if accumulated prob for 1 is bigger, it's toxic
-            #if pd['1'] > pd['0']:
-            #    text_labels[i] = '1'
+            if pd['1'] > pd['0']:
+                text_labels[i] = '1'
             # end if
 
             # Strategy 2: if label 1 (toxic) has been assigned in at least
             # two frames, it's toxic.
-            if pd['1'] >= 1.:
-                text_labels[i] = '1'
+            #if pd['1'] >= 1.:
+            #    text_labels[i] = '1'
             # end if
         # end for
 
-        return (text_toks, text_labels)
+        return text_labels
 
 
 if __name__ == '__main__':
-    
     # Load word embeddings to use as inputs
     we = dataset.WordEmbeddings()
     conf_input_size = we.get_vector_size()
@@ -287,6 +290,36 @@ if __name__ == '__main__':
         td_test = dataset.ToxicData(
             os.path.join('data', 'tsd_test.csv'), txt_proc)
         toxic_tagger.load_model(sys.argv[2])
+
+        correct_one = 0
+        existing_one = 0
+        predicted_one = 0
+
+        for i, (tokens, gt_labels) in enumerate(td_test.get_parsed_data()):
+            inputs_tens, _ = txt_proc.process_training_tokens(
+                tokens, gt_labels)
+            pred_labels = \
+                toxic_tagger.run_toxic_module(inputs_tens, len(tokens))
+            # Convert predicted labels to ints
+            pred_labels = [int(x) for x in pred_labels]
+            
+            assert len(pred_labels) == len(gt_labels)
+            
+            predicted_one += pred_labels.count(1)
+            existing_one += gt_labels.count(1)
+            correct_one += [1 for x,
+                            y in zip(pred_labels, gt_labels) if x == y and x == 1].count(1)
+
+            print(f'Evaluated {i + 1}/{len(td_test.get_parsed_data())} examples', file=sys.stderr, flush=True)
+        # end for
+
+        prec_one = correct_one / predicted_one
+        rec_one = correct_one / existing_one
+        f1_one = 2 * prec_one * rec_one / (prec_one + rec_one)
+
+        print(f'P(1) = {prec_one:.5f}')
+        print(f'R(1) = {rec_one:.5f}')
+        print(f'F1(1) = {f1_one:.5f}')
     elif len(sys.argv) == 4 and sys.argv[1] == '-r' and \
         os.path.isfile(sys.argv[2]) and os.path.isfile(sys.argv[3]):
         # Run mode, load model from the -r argument
@@ -304,5 +337,8 @@ if __name__ == '__main__':
             print(f'{tok}\t{lbl}', flush=True)
         # end for
     else:
-        print('Usage:\n  python|python3 offensive.py -t\n  python|python3 offensive.py -r <models/saved_model_file> <test_file.txt>')
+        print('Usage:', file=sys.stderr)
+        print('Training mode: python offensive.py -t', file=sys.stderr)
+        print('Evaluation mode (on file data/tsd_test.csv): python offensive.py -e <models/saved_model_file>', file=sys.stderr)
+        print('Run mode on a text file: python offensive.py -r <models/saved_model_file> test_file.txt', file=sys.stderr)
     # end if
