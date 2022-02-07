@@ -16,9 +16,9 @@ _device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # The size of the dense layer between LSTM output and classification layer
 _conf_dense_size = 128
 # How many words in a sequence for training/detection toxicity
-_conf_seqence_length = 10
+_conf_seqence_length = 5
 # Size of the hidden layer
-_conf_hidden_size = 64
+_conf_hidden_size = 32
 
 
 class ToxicDetectorModule(nn.Module):
